@@ -252,3 +252,21 @@ impl TimeProvider for OcclumTimeProvider {
         }
     }
 }
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+#[allow(non_camel_case_types)]
+
+pub struct itimerspec_t {
+    it_interval: timespec_t,
+    it_value: timespec_t,
+}
+
+impl itimerspec_t {
+    pub fn new(interval: timespec_t, value: timespec_t) -> Self {
+        Self {
+            it_interval: interval,
+            it_value: value,
+        }
+    }
+}
