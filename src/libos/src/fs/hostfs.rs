@@ -283,7 +283,7 @@ impl HNode {
     }
 }
 
-trait IntoFsError {
+pub trait IntoFsError {
     fn into_fs_error(self) -> FsError;
 }
 
