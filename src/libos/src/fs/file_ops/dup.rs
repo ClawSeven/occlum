@@ -4,7 +4,7 @@ use misc::resource_t;
 pub fn do_dup(old_fd: FileDesc) -> Result<FileDesc> {
     let current = current!();
     let file = current.file(old_fd)?;
-    let new_fd = current.add_file(file, false);
+    let new_fd = current.add_file(file, false)?;
     Ok(new_fd)
 }
 

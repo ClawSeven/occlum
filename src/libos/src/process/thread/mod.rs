@@ -120,7 +120,7 @@ impl Thread {
     }
 
     /// Add a file to the file table.
-    pub fn add_file(&self, new_file: FileRef, close_on_spawn: bool) -> FileDesc {
+    pub fn add_file(&self, new_file: FileRef, close_on_spawn: bool) -> Result<FileDesc> {
         self.files().lock().unwrap().put(new_file, close_on_spawn)
     }
 

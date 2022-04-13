@@ -32,8 +32,8 @@ impl Default for ResourceLimits {
         // heap, stack and mmap size.
         let address_space = rlimit_t::new(cfg_heap_size + cfg_stack_size + cfg_mmap_size);
 
-        // Set init open files limit to 1024 which is default value for Ubuntu
-        let open_files = rlimit_t::new(1024);
+        // Set init open files limit to 4096 which is default value for linux init hard limit
+        let open_files = rlimit_t::new(4096);
 
         let mut rlimits = ResourceLimits {
             rlimits: [Default::default(); RLIMIT_COUNT],
@@ -58,7 +58,7 @@ impl rlimit_t {
     fn new(cur: u64) -> rlimit_t {
         rlimit_t {
             cur: cur,
-            max: u64::max_value(),
+            max: u64::MAX,
         }
     }
 
@@ -74,8 +74,8 @@ impl rlimit_t {
 impl Default for rlimit_t {
     fn default() -> rlimit_t {
         rlimit_t {
-            cur: u64::max_value(),
-            max: u64::max_value(),
+            cur: u64::MAX,
+            max: u64::MAX,
         }
     }
 }
@@ -152,7 +152,7 @@ pub fn do_prlimit(
     }
     if let Some(new_limit) = new_limit {
         // Privilege is not granted for setting hard limit
-        if new_limit.get_max() != u64::max_value() {
+        if new_limit.get_max() != u64::MAX {
             return_errno!(EPERM, "setting hard limit is not permitted")
         }
         if new_limit.get_cur() > new_limit.get_max() {

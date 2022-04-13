@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::events::{Event, Notifier};
+use misc::resource_t;
 
 pub type FileDesc = u32;
 
@@ -65,8 +66,19 @@ impl FileTable {
         Ok(min_free_fd)
     }
 
-    pub fn put(&mut self, file: FileRef, close_on_spawn: bool) -> FileDesc {
+    pub fn put(&mut self, file: FileRef, close_on_spawn: bool) -> Result<FileDesc> {
         let mut table = &mut self.table;
+
+        let soft_rlimit_nofile = current!()
+            .rlimits()
+            .lock()
+            .unwrap()
+            .get(resource_t::RLIMIT_NOFILE)
+            .get_cur();
+
+        if table.len() as u64 >= soft_rlimit_nofile {
+            return_errno!(EMFILE, "Too many open files");
+        }
 
         let min_free_fd = if self.num_fds < table.len() {
             table
@@ -83,7 +95,7 @@ impl FileTable {
         table[min_free_fd as usize] = Some(FileTableEntry::new(file, close_on_spawn));
         self.num_fds += 1;
 
-        min_free_fd as FileDesc
+        Ok(min_free_fd as FileDesc)
     }
 
     pub fn put_at(&mut self, fd: FileDesc, file: FileRef, close_on_spawn: bool) {

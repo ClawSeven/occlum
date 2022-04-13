@@ -29,7 +29,7 @@ pub fn do_socket(domain: c_int, socket_type: c_int, protocol: c_int) -> Result<i
     };
 
     let close_on_spawn = file_flags.contains(FileFlags::SOCK_CLOEXEC);
-    let fd = current!().add_file(file_ref, close_on_spawn);
+    let fd = current!().add_file(file_ref, close_on_spawn)?;
     Ok(fd as isize)
 }
 
@@ -133,7 +133,7 @@ pub fn do_accept4(
     if let Ok(socket) = file_ref.as_host_socket() {
         let (new_socket_file, sock_addr_option) = socket.accept(file_flags)?;
         let new_file_ref: Arc<dyn File> = Arc::new(new_socket_file);
-        let new_fd = current!().add_file(new_file_ref, close_on_spawn);
+        let new_fd = current!().add_file(new_file_ref, close_on_spawn)?;
 
         if addr_set {
             if let Some(sock_addr) = sock_addr_option {
@@ -153,7 +153,7 @@ pub fn do_accept4(
     } else if let Ok(unix_socket) = file_ref.as_unix_socket() {
         let (new_socket_file, sock_addr_option) = unix_socket.accept(file_flags)?;
         let new_file_ref: Arc<dyn File> = Arc::new(new_socket_file);
-        let new_fd = current!().add_file(new_file_ref, close_on_spawn);
+        let new_fd = current!().add_file(new_file_ref, close_on_spawn)?;
 
         if addr_set {
             if let Some(sock_addr) = sock_addr_option {
@@ -473,8 +473,8 @@ pub fn do_socketpair(
 
         let current = current!();
         let mut files = current.files().lock().unwrap();
-        sock_pair[0] = files.put(Arc::new(client_socket), close_on_spawn);
-        sock_pair[1] = files.put(Arc::new(server_socket), close_on_spawn);
+        sock_pair[0] = files.put(Arc::new(client_socket), close_on_spawn)?;
+        sock_pair[1] = files.put(Arc::new(server_socket), close_on_spawn)?;
 
         debug!("socketpair: ({}, {})", sock_pair[0], sock_pair[1]);
         Ok(0)
@@ -795,7 +795,7 @@ pub fn do_epoll_create1(raw_flags: c_int) -> Result<isize> {
         & CreationFlags::O_CLOEXEC;
     let epoll_file: Arc<EpollFile> = EpollFile::new();
     let close_on_spawn = flags.contains(CreationFlags::O_CLOEXEC);
-    let epfd = current!().add_file(epoll_file, close_on_spawn);
+    let epfd = current!().add_file(epoll_file, close_on_spawn)?;
     Ok(epfd as isize)
 }
 

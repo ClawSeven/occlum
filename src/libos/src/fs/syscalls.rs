@@ -37,7 +37,7 @@ pub fn do_eventfd2(init_val: u32, flags: i32) -> Result<isize> {
     let fd = current!().add_file(
         file_ref,
         inner_flags.contains(EventCreationFlags::EFD_CLOEXEC),
-    );
+    )?;
     Ok(fd as isize)
 }
 
@@ -61,7 +61,7 @@ pub fn do_timerfd_create(clockid: clockid_t, flags: i32) -> Result<isize> {
     let fd = current!().add_file(
         file_ref,
         timer_create_flags.contains(TimerCreationFlags::TFD_CLOEXEC),
-    );
+    )?;
     Ok(fd as isize)
 }
 
