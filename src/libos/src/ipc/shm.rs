@@ -1,5 +1,6 @@
 use super::*;
 
+use super::ipc::*;
 use crate::fs::FileMode;
 use crate::process::{do_getegid, do_geteuid, gid_t, uid_t, ThreadRef};
 use crate::time::{do_gettimeofday, time_t};
@@ -8,11 +9,6 @@ use crate::vm::{
 };
 use std::collections::{HashMap, HashSet};
 
-#[allow(non_camel_case_types)]
-pub type key_t = u32;
-pub type ShmId = u32;
-pub type CmdId = u32;
-
 // min shared seg size (bytes)
 const SHMMIN: usize = 1;
 // max shared seg size (bytes)
@@ -20,36 +16,6 @@ const SHMMAX: usize = (usize::MAX - (1_usize << 24));
 // max num of segs system wide,
 // also indicates the max shmid - 1 in Occlum
 const SHMMNI: ShmId = 4096;
-
-const IPC_PRIVATE: key_t = 0;
-
-// For cmd in shmctl()
-const IPC_RMID: CmdId = 0;
-const IPC_SET: CmdId = 1;
-const IPC_STAT: CmdId = 2;
-const IPC_INFO: CmdId = 3;
-const SHM_LOCK: CmdId = 11;
-const SHM_UNLOCK: CmdId = 12;
-const SHM_STAT: CmdId = 13;
-const SHM_INFO: CmdId = 14;
-const SHM_STAT_ANY: CmdId = 15;
-
-#[allow(non_camel_case_types)]
-#[derive(Debug)]
-#[repr(C)]
-struct ipc_perm_t {
-    key: key_t,
-    uid: uid_t,
-    gid: gid_t,
-    cuid: uid_t,
-    cgid: gid_t,
-    mode: u16,
-    pad1: u16,
-    seq: u16,
-    pad2: u16,
-    unused1: u64,
-    unused2: u64,
-}
 
 #[allow(non_camel_case_types)]
 #[derive(Debug)]

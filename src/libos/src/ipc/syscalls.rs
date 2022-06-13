@@ -2,7 +2,8 @@ use super::*;
 
 use util::mem_util::from_user;
 
-use super::shm::{shmids_t, CmdId, ShmFlags, ShmId, SHM_MANAGER};
+use super::ipc::{CmdId, ShmId};
+use super::shm::{shmids_t, ShmFlags, SHM_MANAGER};
 
 pub fn do_shmget(key: key_t, size: size_t, shmflg: i32) -> Result<isize> {
     let shmflg =
