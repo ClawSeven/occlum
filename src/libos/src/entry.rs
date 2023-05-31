@@ -429,7 +429,7 @@ fn merge_env(env: *const *const c_char) -> Result<Vec<CString>> {
 
 // Parse host files
 fn parse_host_files(file_buffer: *const host_file_buffer) -> Result<i32> {
-    let resolv_conf_ptr = unsafe { (*file_buffer).resolv_conf_buf };
+    let resolv_conf_ptr: *const c_char = unsafe { (*file_buffer).resolv_conf_buf };
     match parse_host_file(HostFile::ResolvConf, resolv_conf_ptr) {
         Err(e) => {
             error!("failed to parse /etc/resolv.conf: {}", e.backtrace());
@@ -442,7 +442,7 @@ fn parse_host_files(file_buffer: *const host_file_buffer) -> Result<i32> {
         }
     }
 
-    let hostname_ptr = unsafe { (*file_buffer).hostname_buf };
+    let hostname_ptr: *const c_char = unsafe { (*file_buffer).hostname_buf };
     match parse_host_file(HostFile::HostName, hostname_ptr) {
         Err(e) => {
             error!("failed to parse /etc/hostname: {}", e.backtrace());
@@ -456,7 +456,7 @@ fn parse_host_files(file_buffer: *const host_file_buffer) -> Result<i32> {
         }
     }
 
-    let hosts_ptr = unsafe { (*file_buffer).hosts_buf };
+    let hosts_ptr: *const c_char = unsafe { (*file_buffer).hosts_buf };
     match parse_host_file(HostFile::Hosts, hosts_ptr) {
         Err(e) => {
             error!("failed to parse /etc/hosts: {}", e.backtrace());

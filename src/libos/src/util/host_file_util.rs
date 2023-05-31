@@ -45,6 +45,7 @@ pub fn write_host_file(host_file: HostFile) -> Result<()> {
 
     match &*host_file_str {
         Some(str) => {
+            // println!("write host file str: {:?}", &str);
             enclave_file.write(str.as_bytes());
         }
         None => {
@@ -59,6 +60,7 @@ pub fn parse_host_file(host_file: HostFile, host_file_ptr: *const c_char) -> Res
     let host_file_bytes = unsafe { CStr::from_ptr(host_file_ptr).to_bytes() };
     let host_file_str = str::from_utf8(host_file_bytes)
         .map_err(|_| errno!(EINVAL, "host file contains non UTF-8 characters"))?;
+    // println!("{:?}", &host_file_str);
 
     // Parse and inspect host file
     match host_file {
