@@ -32,6 +32,7 @@ pub struct SgxStorage {
     path: PathBuf,
     encrypt_mode: EncryptMode,
     file_cache: Mutex<BTreeMap<u64, LockedFile>>,
+    cache_size: Option<u64>,
 }
 
 impl SgxStorage {
@@ -40,13 +41,16 @@ impl SgxStorage {
         key: &Option<sgx_key_128bit_t>,
         root_mac: &Option<sgx_aes_gcm_128bit_tag_t>,
         autokey_policy: &Option<u32>,
-    ) -> Self {
+        cache_size: Option<u64>,
+    ) -> Result<Self> {
         // assert!(path.as_ref().is_dir());
-        SgxStorage {
+        Self::check_cache_size(&cache_size)?;
+        Ok(SgxStorage {
             path: path.as_ref().to_path_buf(),
             encrypt_mode: EncryptMode::new(key, root_mac, autokey_policy),
             file_cache: Mutex::new(BTreeMap::new()),
-        }
+            cache_size,
+        })
     }
     /// Get file by `file_id`.
     /// It lookups cache first, if miss, then call `open_fn` to open one,
@@ -85,6 +89,21 @@ impl SgxStorage {
     ) -> Result<LockedFile> {
         open_fn(self)
     }
+
+    fn check_cache_size(cache_size: &Option<u64>) -> Result<()> {
+        const PAGE_SIZE: u64 = 0x1000;
+        const DEFAULT_CACHE_SIZE: u64 = 48 * PAGE_SIZE;
+        if let Some(size) = *cache_size {
+            if size < DEFAULT_CACHE_SIZE || size % PAGE_SIZE != 0 {
+                error!(
+                    "invalid cache size: {}, must larger than default size: {} and aligned with page size: {}",
+                    size, DEFAULT_CACHE_SIZE, PAGE_SIZE
+                );
+                return_errno!(EINVAL, "invalid cache size");
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Storage for SgxStorage {
@@ -100,11 +119,13 @@ impl Storage for SgxStorage {
             let file = match self.encrypt_mode {
                 EncryptMode::IntegrityOnly(_) => options.open_integrity_only(path)?,
                 EncryptMode::EncryptWithIntegrity(key, _) | EncryptMode::Encrypt(key) => {
-                    options.open_ex(path, &key)?
+                    options.open_with(path, Some(&key), None, self.cache_size)?
                 }
                 EncryptMode::EncryptAutoKey(key_policy) => match key_policy {
-                    None => options.open(path)?,
-                    Some(policy) => options.open_with(path, None, Some(policy.bits()), None)?,
+                    None => options.open_with(path, None, None, self.cache_size)?,
+                    Some(policy) => {
+                        options.open_with(path, None, Some(policy.bits()), self.cache_size)?
+                    }
                 },
             };
 
@@ -138,11 +159,13 @@ impl Storage for SgxStorage {
             let file = match self.encrypt_mode {
                 EncryptMode::IntegrityOnly(_) => options.open_integrity_only(path)?,
                 EncryptMode::EncryptWithIntegrity(key, _) | EncryptMode::Encrypt(key) => {
-                    options.open_ex(path, &key)?
+                    options.open_with(path, Some(&key), None, self.cache_size)?
                 }
                 EncryptMode::EncryptAutoKey(key_policy) => match key_policy {
-                    None => options.open(path)?,
-                    Some(policy) => options.open_with(path, None, Some(policy.bits()), None)?,
+                    None => options.open_with(path, None, None, self.cache_size)?,
+                    Some(policy) => {
+                        options.open_with(path, None, Some(policy.bits()), self.cache_size)?
+                    }
                 },
             };
             Ok(LockedFile(Arc::new(Mutex::new(file))))
@@ -219,7 +242,7 @@ impl EncryptMode {
 }
 
 bitflags! {
-    struct KeyPolicy: u16 {
+    pub struct KeyPolicy: u16 {
         const KEYPOLICY_MRENCLAVE = 0x0001;
         const KEYPOLICY_MRSIGNER = 0x0002;
         const KEYPOLICY_NOISVPRODID = 0x0004;

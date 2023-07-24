@@ -47,6 +47,7 @@
 #![feature(get_mut_unchecked)]
 #![feature(in_band_lifetimes)]
 #![feature(map_first_last)]
+#![feature(new_uninit)]
 #![feature(slice_group_by)]
 
 #[cfg(feature = "sgx")]
@@ -74,7 +75,7 @@ mod prelude;
 pub use self::cached_disk::CachedDisk;
 use self::page::Page;
 pub use self::page_alloc::{FixedSizePageAlloc, PageAlloc};
-pub use self::page_cache::{PageCache, PageCacheFlusher};
+pub use self::page_cache::{PageCache, PageCacheFlusher, PageKey};
 use self::page_evictor::PageEvictor;
-pub use self::page_handle::{PageHandle, PageHandleGuard, PageKey};
+pub use self::page_handle::{PageHandle, PageHandleGuard};
 pub use self::page_state::PageState;

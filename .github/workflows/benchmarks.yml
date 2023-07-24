@@ -1,12 +1,9 @@
 name: Benchmarks Test
 
 on:
-  push:
-    branches:
-      - 1.0.0-preview
   schedule:
-    # Schedule to run everyday at 10PM UTC (6AM CST)
-    - cron:  '0 22 * * *'
+    # Schedule to run on Wed,Sat at 10PM UTC (6AM CST)
+    - cron:  '0 22 * * 3,6'
 
 jobs:
   Sysbench_Test:
@@ -20,6 +17,8 @@ jobs:
     - name: Clean before running
       run: |
         sudo chown -R ${{ secrets.CI_ADMIN }} "${{ github.workspace }}"
+
+    - uses: AutoModality/action-clean@v1
 
     - name: Checkout code
       uses: actions/checkout@v2
@@ -71,6 +70,8 @@ jobs:
       run: |
         sudo chown -R ${{ secrets.CI_ADMIN }} "${{ github.workspace }}"
 
+    - uses: AutoModality/action-clean@v1
+
     - name: Checkout code
       uses: actions/checkout@v2
       with:
@@ -121,6 +122,8 @@ jobs:
       run: |
         sudo chown -R ${{ secrets.CI_ADMIN }} "${{ github.workspace }}"
 
+    - uses: AutoModality/action-clean@v1
+
     - name: Checkout code
       uses: actions/checkout@v2
       with:
@@ -132,7 +135,7 @@ jobs:
         build-envs: 'OCCLUM_RELEASE_BUILD=1'
 
     - name: Run fio download and build
-      run: docker exec ${{ env.CONTAINER_NAME }} bash -c "cd /root/occlum/demos/benchmarks/fio && ./fio_microbench.sh"
+      run: docker exec ${{ env.CONTAINER_NAME }} bash -c "cd /root/occlum/demos/benchmarks/fio && ./fio_microbench.sh /root/fio-microbench"
 
     - name: Copy result
       run: docker cp ${{ env.CONTAINER_NAME }}:/root/occlum/demos/benchmarks/fio/result.json .
@@ -141,7 +144,7 @@ jobs:
     - name: Store benchmark result
       uses: benchmark-action/github-action-benchmark@v1
       with:
-        name: FIO Benchmark
+        name: FIO Benchmark (AsyncSFS + JinDisk)
         # What benchmark tool the output.txt came from
         tool: 'customBiggerIsBetter'
         # Where the output from the benchmark tool is stored

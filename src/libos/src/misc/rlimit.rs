@@ -132,7 +132,7 @@ impl resource_t {
 /// and the input argument pid can only be process ID, not thread ID. This
 /// (unnecessary) restriction is lifted by our implementation. Nevertheless,
 /// since the rlimits object is shared between threads in a process, the
-/// semantic of limiting resource usage on a per-process basisi is preserved.
+/// semantic of limiting resource usage on a per-process basis is preserved.
 ///
 /// Limitation: Current implementation only takes effect on child processes.
 pub fn do_prlimit(
@@ -151,10 +151,6 @@ pub fn do_prlimit(
         *old_limit = *rlimits.get(resource)
     }
     if let Some(new_limit) = new_limit {
-        // Privilege is not granted for setting hard limit
-        if new_limit.get_max() != u64::max_value() {
-            return_errno!(EPERM, "setting hard limit is not permitted")
-        }
         if new_limit.get_cur() > new_limit.get_max() {
             return_errno!(EINVAL, "soft limit is greater than hard limit");
         }
@@ -172,7 +168,7 @@ pub fn do_prlimit(
             resource_t::RLIMIT_AS => {
                 soft_rlimit_address_space_size = new_limit.get_cur();
             }
-            _ => warn!("resource type not supported"),
+            _ => (),
         }
 
         let soft_data_and_stack_size = soft_rlimit_data_size

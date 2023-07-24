@@ -3,12 +3,12 @@ use super::*;
 use super::vm_area::*;
 use super::vm_perms::VMPerms;
 use crate::fs::FileMode;
-use std::collections::BTreeSet;
 
 use intrusive_collections::rbtree::{Link, RBTree};
 use intrusive_collections::Bound;
 use intrusive_collections::RBTreeLink;
 use intrusive_collections::{intrusive_adapter, KeyAdapter};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug)]
 pub enum VMInitializer {
@@ -20,7 +20,7 @@ pub enum VMInitializer {
     FileBacked {
         file: FileBacked,
     },
-    // For ELF files, there is specical handling to not copy all the contents of the file. This is only used for tracking.
+    // For ELF files, there is special handling to not copy all the contents of the file. This is only used for tracking.
     ElfSpecific {
         elf_file: FileRef,
     },
@@ -40,7 +40,7 @@ impl Default for VMInitializer {
 }
 
 impl VMInitializer {
-    pub fn init_slice(&self, buf: &mut [u8]) -> Result<()> {
+    pub async fn init_slice(&self, buf: &mut [u8]) -> Result<()> {
         match self {
             VMInitializer::DoNothing() | VMInitializer::ElfSpecific { .. } => {
                 // Do nothing
@@ -69,9 +69,8 @@ impl VMInitializer {
                     .unwrap()
                     .dentry()
                     .inode()
-                    .as_sync_inode()
-                    .unwrap()
                     .read_at(file.offset(), buf)
+                    .await
                     .map_err(|_| errno!(EACCES, "failed to init memory from file"))?;
                 for b in &mut buf[len..] {
                     *b = 0;
@@ -97,9 +96,8 @@ impl VMInitializer {
                     .unwrap()
                     .dentry()
                     .inode()
-                    .as_sync_inode()
-                    .unwrap()
                     .read_at(*offset, &mut buf[copy_len..])
+                    .await
                     .map_err(|_| errno!(EACCES, "failed to init memory from file"))?;
                 for b in &mut buf[(copy_len + len)..] {
                     *b = 0;
@@ -446,7 +444,7 @@ pub trait VMRemapParser {
         // For Linux, writing to either memory vma or the file will update the other two equally. But we won't be able to support this before
         // we really have paging. Thus, if the old_range is not equal to a recorded vma, we will just return with error.
         if writeback_file.is_some() && &old_range != vma.range() {
-            return_errno!(EINVAL, "Known limition")
+            return_errno!(EINVAL, "Known limitation")
         }
 
         // Implement mremap as one optional mmap followed by one optional munmap.
@@ -636,7 +634,7 @@ pub trait VMRemapParser {
 }
 
 // Generate a random address within [0, range]
-// Note: This function doesn't gurantee alignment
+// Note: This function doesn't guarantee alignment
 pub fn get_randomize_offset(range: usize) -> usize {
     if cfg!(debug_assertions) {
         return range;

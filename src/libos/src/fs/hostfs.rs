@@ -1,3 +1,4 @@
+use crate::fs::fs_ops::fetch_host_statfs;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
@@ -39,8 +40,8 @@ impl FileSystem for HostFS {
     }
 
     fn info(&self) -> FsInfo {
-        warn!("HostFS: FsInfo is unimplemented");
-        Default::default()
+        let statfs = fetch_host_statfs(&self.path.to_string_lossy()).unwrap();
+        statfs.into()
     }
 }
 
@@ -95,20 +96,6 @@ impl INode for HNode {
         let file = guard.as_mut().unwrap();
         let len = try_std!(file.write_at(buf, offset as u64));
         Ok(len)
-    }
-
-    fn poll(&self) -> Result<PollStatus> {
-        if !self.is_file() {
-            return Err(FsError::NotFile);
-        }
-        let guard = self.open_file()?;
-        let file = guard.as_ref().unwrap();
-        let metadata = try_std!(file.metadata());
-        Ok(PollStatus {
-            read: true,
-            write: !metadata.permissions().readonly(),
-            error: false,
-        })
     }
 
     fn metadata(&self) -> Result<Metadata> {
@@ -268,10 +255,9 @@ impl INode for HNode {
             return Err(FsError::NotDir);
         }
         let idx = ctx.pos();
-        let mut total_written_len = 0;
         for entry in try_std!(self.path.read_dir()).skip(idx) {
             let entry = try_std!(entry);
-            let written_len = match ctx.write_entry(
+            if let Err(e) = ctx.write_entry(
                 &entry
                     .file_name()
                     .into_string()
@@ -282,18 +268,14 @@ impl INode for HNode {
                     .map_err(|_| FsError::InvalidParam)?
                     .into_fs_filetype(),
             ) {
-                Ok(written_len) => written_len,
-                Err(e) => {
-                    if total_written_len == 0 {
-                        return Err(e);
-                    } else {
-                        break;
-                    }
+                if ctx.written_len() == 0 {
+                    return Err(e);
+                } else {
+                    break;
                 }
             };
-            total_written_len += written_len;
         }
-        Ok(total_written_len)
+        Ok(ctx.written_len())
     }
 
     fn io_control(&self, cmd: u32, data: usize) -> Result<()> {

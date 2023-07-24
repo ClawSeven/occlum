@@ -30,6 +30,14 @@ Table of Contents
 
 .. toctree::
    :maxdepth: 2
+   :caption: Tutorials
+
+   tutorials/gen_occlum_instance.md
+   tutorials/distributed_pytorch.md
+   tutorials/occlum_ppml.md
+
+.. toctree::
+   :maxdepth: 2
    :caption: Inside Occlum
 
    boot_flow.md

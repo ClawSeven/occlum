@@ -1,8 +1,6 @@
 use crate::prelude::*;
-use block_device::{
-    BioReqBuilder, BioType, BlockBuf, BlockDevice, BlockDeviceAsFile, BlockId, BlockRangeIter,
-    BLOCK_SIZE,
-};
+use block_device::{Bid, BlockDeviceAsFile, BlockRangeIter, BLOCK_SIZE};
+use errno::return_errno;
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -27,8 +25,8 @@ use std::time::Duration;
 pub struct CachedDisk<A: PageAlloc>(Arc<Inner<A>>);
 
 struct Inner<A: PageAlloc> {
-    disk: Arc<dyn BlockDevice>,
-    cache: PageCache<BlockId, A>,
+    disk: Arc<dyn BlockDeviceAsFile>,
+    cache: PageCache<Bid, A>,
     flusher_wq: WaiterQueue,
     // This read-write lock is used to control the concurrent
     // writers and flushers. A writer acquires the read lock,
@@ -37,17 +35,17 @@ struct Inner<A: PageAlloc> {
     // and writers. This policy is important to implement
     // the semantic of the flush operation correctly.
     arw_lock: AsyncRwLock<()>,
-    // Whether CachedDisk is droppedd
+    // Whether CachedDisk is dropped
     is_dropped: AtomicBool,
 }
 
-impl PageKey for BlockId {}
+impl PageKey for Bid {}
 
 impl<A: PageAlloc> CachedDisk<A> {
     /// Create a new `CachedDisk`.
     ///
     /// Specify a backing disk which implements `BlockDevice`.
-    pub fn new(disk: Arc<dyn BlockDevice>) -> Result<Self> {
+    pub fn new(disk: Arc<dyn BlockDeviceAsFile>) -> Result<Self> {
         let flusher = Arc::new(CachedDiskFlusher::<A>::new());
         let cache = PageCache::new(flusher.clone());
         let flusher_wq = WaiterQueue::new();
@@ -107,7 +105,7 @@ impl<A: PageAlloc> CachedDisk<A> {
 #[async_trait]
 impl<A: PageAlloc> BlockDeviceAsFile for CachedDisk<A> {
     fn total_bytes(&self) -> usize {
-        self.0.disk.total_blocks() * BLOCK_SIZE
+        self.0.disk.total_bytes()
     }
 
     async fn read(&self, offset: usize, buf: &mut [u8]) -> Result<usize> {
@@ -122,7 +120,7 @@ impl<A: PageAlloc> BlockDeviceAsFile for CachedDisk<A> {
         self.0.sync().await
     }
 
-    async fn flush_blocks(&self, blocks: &[BlockId]) -> Result<usize> {
+    async fn flush_blocks(&self, blocks: &[Bid]) -> Result<usize> {
         self.0.flush_pages(blocks).await
     }
 }
@@ -140,6 +138,16 @@ impl<A: PageAlloc> Inner<A> {
             block_size: BLOCK_SIZE,
         };
 
+        // Batch read
+        const BATCH_READ_THRESHOLD: usize = 2;
+        if block_range_iter.len() >= BATCH_READ_THRESHOLD {
+            return self
+                .read_multi_pages(block_range_iter, buf)
+                .await
+                .map(|_| buf.len());
+        }
+
+        // One-by-one read
         let mut read_len = 0;
         for range in block_range_iter {
             let read_buf = &mut buf[read_len..read_len + range.len()];
@@ -179,13 +187,13 @@ impl<A: PageAlloc> Inner<A> {
     /// Check if the arguments for a read or write is valid.
     fn check_rw_args(&self, offset: usize, buf: &[u8]) {
         debug_assert!(
-            offset + buf.len() <= self.disk.total_blocks() * BLOCK_SIZE,
+            offset + buf.len() <= self.disk.total_bytes(),
             "read/write length exceeds total blocks limit"
         );
     }
 
     /// Read a single page content from `offset` into the given buffer.
-    async fn read_one_page(&self, bid: BlockId, buf: &mut [u8], offset: usize) -> Result<usize> {
+    async fn read_one_page(&self, bid: Bid, buf: &mut [u8], offset: usize) -> Result<usize> {
         debug_assert!(buf.len() + offset <= BLOCK_SIZE);
 
         let page_handle = self.acquire_page(bid).await?;
@@ -238,8 +246,93 @@ impl<A: PageAlloc> Inner<A> {
         Ok(read_len)
     }
 
+    /// Read multi pages with disk batch fetch into the given buffer. Do NOT allow partial read.
+    async fn read_multi_pages(
+        &self,
+        block_range_iter: BlockRangeIter,
+        buf: &mut [u8],
+    ) -> Result<()> {
+        // Read cached pages and collect uninit pages
+        let mut uninit_pages = Vec::new();
+        let mut offset = 0;
+        'outer: for range in block_range_iter {
+            let page_handle = self.acquire_page(range.block_id).await?;
+            let mut page_guard = page_handle.lock();
+            loop {
+                match page_guard.state() {
+                    // The page is ready for read
+                    PageState::UpToDate | PageState::Dirty | PageState::Flushing => {
+                        break;
+                    }
+                    // The page is not initialized. So we need to
+                    // collect it for batch read later.
+                    PageState::Uninit => {
+                        page_guard.set_state(PageState::Fetching);
+                        Self::clear_page_events(&page_handle);
+                        drop(page_guard);
+
+                        uninit_pages.push((offset, range.clone(), page_handle));
+                        offset += range.len();
+                        continue 'outer;
+                    }
+                    // The page is being fetched. We just try again
+                    // later to see if it is ready.
+                    PageState::Fetching => {
+                        drop(page_guard);
+                        Self::wait_page_events(&page_handle, Events::IN).await;
+                        page_guard = page_handle.lock();
+                    }
+                }
+            }
+            let range_len = range.len();
+            buf[offset..offset + range_len]
+                .copy_from_slice(&page_guard.as_slice()[range.begin..range.begin + range_len]);
+
+            drop(page_guard);
+            self.cache.release(page_handle);
+            offset += range_len;
+        }
+
+        // Group uninit pages in consecutive batches
+        let page_batches = uninit_pages.group_by(|(_, range1, _), (_, range2, _)| {
+            range2.block_id.to_raw() - range1.block_id.to_raw() == 1
+        });
+
+        // Perform batch disk read into multi uninit pages
+        let mut blocks_buf =
+            unsafe { Box::new_uninit_slice(uninit_pages.len() * BLOCK_SIZE).assume_init() };
+        for page_batch in page_batches {
+            let buf_len = page_batch.len() * BLOCK_SIZE;
+            let first_bid = page_batch.first().unwrap().1.block_id;
+            let read_len = self
+                .read_block(first_bid, &mut blocks_buf[..buf_len])
+                .await?;
+            if read_len < buf_len {
+                // Do not allow partial holed read in a batch read
+                return_errno!(EIO, "failed to read expected length in batch read");
+            }
+
+            for (nth, (offset, range, page_handle)) in page_batch.iter().enumerate() {
+                let mut page_guard = page_handle.lock();
+                debug_assert!(page_guard.state() == PageState::Fetching);
+                page_guard
+                    .as_slice_mut()
+                    .copy_from_slice(&blocks_buf[nth * BLOCK_SIZE..(nth + 1) * BLOCK_SIZE]);
+                buf[*offset..*offset + range.len()]
+                    .copy_from_slice(&page_guard.as_slice()[range.begin..range.end]);
+
+                page_guard.set_state(PageState::UpToDate);
+                Self::notify_page_events(&page_handle, Events::IN);
+                drop(page_guard);
+                self.cache.release(page_handle.clone());
+            }
+        }
+
+        Ok(())
+    }
+
     /// Write a single page content from `offset` into the given buffer.
-    async fn write_one_page(&self, bid: BlockId, buf: &[u8], offset: usize) -> Result<usize> {
+    async fn write_one_page(&self, bid: Bid, buf: &[u8], offset: usize) -> Result<usize> {
         debug_assert!(buf.len() + offset <= BLOCK_SIZE);
 
         let page_handle = self.acquire_page(bid).await?;
@@ -298,15 +391,13 @@ impl<A: PageAlloc> Inner<A> {
 
     /// Write back to block device block-by-block.
     ///
-    /// Currently we use `flush()` (write back to disk in batches) rather than `flush_by_block()`
-    /// for better I/O performance.
-    #[allow(dead_code)]
-    pub async fn flush_by_block(&self) -> Result<usize> {
+    /// On success, return the number of flushed pages.
+    pub async fn flush(&self) -> Result<usize> {
         let mut total_pages = 0;
         let aw_lock = self.arw_lock.write().await;
 
         let mut flush_pages = Vec::with_capacity(128);
-        const MAX_BATCH_SIZE: usize = 2048;
+        const MAX_BATCH_SIZE: usize = 1024;
         loop {
             flush_pages.clear();
             let num_pages = self
@@ -329,6 +420,7 @@ impl<A: PageAlloc> Inner<A> {
                 self.write_block(&bid, page_buf).await?;
 
                 let mut page_guard = page_handle.lock();
+
                 debug_assert!(page_guard.state() == PageState::Flushing);
                 page_guard.set_state(PageState::UpToDate);
                 Self::notify_page_events(&page_handle, Events::OUT);
@@ -348,64 +440,8 @@ impl<A: PageAlloc> Inner<A> {
         Ok(total_pages)
     }
 
-    /// Write back cached pages to block device in consecutive batches.
-    ///
-    /// On success, return the number of flushed pages.
-    pub async fn flush(&self) -> Result<usize> {
-        let mut total_pages = 0;
-        let aw_lock = self.arw_lock.write().await;
-
-        let mut flush_pages = Vec::with_capacity(128);
-        const MAX_BATCH_SIZE: usize = 1024;
-        loop {
-            flush_pages.clear();
-            let num_pages = self
-                .cache
-                .pop_dirty_to_flush(&mut flush_pages, MAX_BATCH_SIZE);
-            if num_pages == 0 {
-                break;
-            }
-
-            for page_handles in PageCache::group_consecutive_pages(&flush_pages) {
-                let mut bufs = Vec::with_capacity(page_handles.len());
-                for page_handle in page_handles {
-                    let page_guard = page_handle.lock();
-                    debug_assert!(page_guard.state() == PageState::Flushing);
-                    Self::clear_page_events(&page_handle);
-
-                    let page_ptr = page_guard.as_ptr();
-                    drop(page_guard);
-                    bufs.push(unsafe { BlockBuf::from_raw_parts(page_ptr, BLOCK_SIZE) });
-                }
-
-                let first_block_addr: BlockId = page_handles[0].key().into();
-                self.write_consecutive_blocks(first_block_addr, bufs)
-                    .await?;
-
-                for page_handle in page_handles {
-                    let mut page_guard = page_handle.lock();
-                    debug_assert!(page_guard.state() == PageState::Flushing);
-                    page_guard.set_state(PageState::UpToDate);
-                    Self::notify_page_events(&page_handle, Events::OUT);
-                    drop(page_guard);
-                }
-            }
-
-            total_pages += num_pages;
-        }
-
-        drop(aw_lock);
-        // At this point, we can be certain that all writes
-        // have been written back to the disk because
-        // 1) There are no concurrent writers;
-        // 2) There are no concurrent flushers;
-        // 3) All dirty pages have been cleared.
-        trace!("[CachedDisk] flush pages: {}", total_pages);
-        Ok(total_pages)
-    }
-
     /// Write back specified pages to block device, given an array of block IDs.
-    pub async fn flush_pages(&self, pages: &[BlockId]) -> Result<usize> {
+    pub async fn flush_pages(&self, pages: &[Bid]) -> Result<usize> {
         let mut total_pages = 0;
 
         for bid in pages {
@@ -451,7 +487,7 @@ impl<A: PageAlloc> Inner<A> {
 
     /// Acquire one page from page cache.
     /// Poll the readiness events on page cache if failed.
-    async fn acquire_page(&self, block_id: BlockId) -> Result<PageHandle<BlockId, A>> {
+    async fn acquire_page(&self, block_id: Bid) -> Result<PageHandle<Bid, A>> {
         loop {
             if let Some(page_handle) = self.cache.acquire(block_id) {
                 break Ok(page_handle);
@@ -466,45 +502,24 @@ impl<A: PageAlloc> Inner<A> {
         }
     }
 
-    async fn read_block(&self, block_id: BlockId, buf: &mut [u8]) -> Result<usize> {
-        let offset = block_id * BLOCK_SIZE;
-        self.disk.read(offset, buf).await
+    async fn read_block(&self, block_id: Bid, buf: &mut [u8]) -> Result<usize> {
+        self.disk.read(block_id.to_offset(), buf).await
     }
 
-    async fn write_block(&self, block_id: &BlockId, buf: &[u8]) -> Result<usize> {
-        let offset = block_id * BLOCK_SIZE;
-        self.disk.write(offset, buf).await
+    async fn write_block(&self, block_id: &Bid, buf: &[u8]) -> Result<usize> {
+        self.disk.write(block_id.to_offset(), buf).await
     }
 
-    async fn write_consecutive_blocks(
-        &self,
-        addr: BlockId,
-        write_bufs: Vec<BlockBuf>,
-    ) -> Result<()> {
-        let req = BioReqBuilder::new(BioType::Write)
-            .addr(addr)
-            .bufs(write_bufs)
-            .build();
-        let submission = self.disk.submit(Arc::new(req));
-        let req = submission.complete().await;
-        let res = req.response().unwrap();
-
-        if let Err(e) = res {
-            return Err(errno!(e.errno(), "write on a block device failed"));
-        }
-        Ok(())
-    }
-
-    fn clear_page_events(page_handle: &PageHandle<BlockId, A>) {
+    fn clear_page_events(page_handle: &PageHandle<Bid, A>) {
         page_handle.pollee().reset_events();
     }
 
-    fn notify_page_events(page_handle: &PageHandle<BlockId, A>, events: Events) {
+    fn notify_page_events(page_handle: &PageHandle<Bid, A>, events: Events) {
         page_handle.pollee().add_events(events);
     }
 
     #[allow(unused)]
-    async fn wait_page_events(page_handle: &PageHandle<BlockId, A>, events: Events) {
+    async fn wait_page_events(page_handle: &PageHandle<Bid, A>, events: Events) {
         let poller = Poller::new();
         if page_handle.pollee().poll(events, Some(&poller)).is_empty() {
             poller.wait().await;

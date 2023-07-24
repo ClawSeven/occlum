@@ -194,10 +194,11 @@ pub struct ConfigMountOptions {
     pub mac: Option<sgx_aes_gcm_128bit_tag_t>,
     pub layers: Option<Vec<ConfigMount>>,
     pub temporary: bool,
-    pub total_size: Option<usize>,
+    pub async_sfs_total_size: Option<usize>,
     pub page_cache_size: Option<usize>,
     pub index: u32,
     pub autokey_policy: Option<u32>,
+    pub sefs_cache_size: Option<u64>,
 }
 
 impl Config {
@@ -349,16 +350,6 @@ impl ConfigMountOptions {
         } else {
             None
         };
-        let total_size = if input.total_size.is_some() {
-            Some(parse_memory_size(input.total_size.as_ref().unwrap())?)
-        } else {
-            None
-        };
-        let page_cache_size = if input.page_cache_size.is_some() {
-            Some(parse_memory_size(input.page_cache_size.as_ref().unwrap())?)
-        } else {
-            None
-        };
         let layers = if let Some(layers) = &input.layers {
             let layers = layers
                 .iter()
@@ -368,19 +359,55 @@ impl ConfigMountOptions {
         } else {
             None
         };
+        let async_sfs_total_size = if input.async_sfs_total_size.is_some() {
+            Some(parse_memory_size(
+                input.async_sfs_total_size.as_ref().unwrap(),
+            )?)
+        } else {
+            None
+        };
+        let page_cache_size = if input.page_cache_size.is_some() {
+            Some(parse_memory_size(input.page_cache_size.as_ref().unwrap())?)
+        } else {
+            None
+        };
+        let sefs_cache_size = if input.sefs_cache_size.is_some() {
+            Some(parse_memory_size(input.sefs_cache_size.as_ref().unwrap())? as _)
+        } else {
+            None
+        };
         Ok(ConfigMountOptions {
             mac,
             layers,
             temporary: input.temporary,
-            total_size,
+            async_sfs_total_size,
             page_cache_size,
             index: input.index,
             autokey_policy: input.autokey_policy,
+            sefs_cache_size,
         })
+    }
+
+    pub fn gen_async_sfs_default() -> Self {
+        let (async_sfs_total_size, page_cache_size) = {
+            const MB: usize = 1024 * 1024;
+            const GB: usize = 1024 * MB;
+            (10 * GB, 256 * MB)
+        };
+        Self {
+            mac: None,
+            layers: None,
+            temporary: false,
+            async_sfs_total_size: Some(async_sfs_total_size),
+            page_cache_size: Some(page_cache_size),
+            index: 0,
+            autokey_policy: None,
+            sefs_cache_size: None,
+        }
     }
 }
 
-fn parse_memory_size(mem_str: &str) -> Result<usize> {
+pub fn parse_memory_size(mem_str: &str) -> Result<usize> {
     const UNIT2FACTOR: [(&str, usize); 5] = [
         ("KB", 1024),
         ("MB", 1024 * 1024),
@@ -518,13 +545,15 @@ struct InputConfigMountOptions {
     #[serde(default)]
     pub temporary: bool,
     #[serde(default)]
-    pub total_size: Option<String>,
+    pub async_sfs_total_size: Option<String>,
     #[serde(default)]
     pub page_cache_size: Option<String>,
     #[serde(default)]
     pub index: u32,
     #[serde(default)]
     pub autokey_policy: Option<u32>,
+    #[serde(default)]
+    pub sefs_cache_size: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -636,7 +665,7 @@ impl ConfigApp {
             .find(|m| m.target == Path::new("/") && m.type_ == ConfigMountFsType::TYPE_UNIONFS)
             .ok_or_else(|| errno!(Errno::ENOENT, "the root UnionFS is not valid"))?;
 
-        if upper_layer.is_some() {
+        if lower_layer.is_some() {
             let layer_mount_configs = root_mount_config.options.layers.as_mut().unwrap();
             // image SEFS in layers
             let root_image_sefs_mount_config = layer_mount_configs
@@ -648,27 +677,26 @@ impl ConfigApp {
                 })
                 .ok_or_else(|| errno!(Errno::ENOENT, "the image SEFS in layers is not valid"))?;
 
-            root_image_sefs_mount_config.source = upper_layer;
+            root_image_sefs_mount_config.source = lower_layer;
             root_image_sefs_mount_config.options.mac = None;
             root_image_sefs_mount_config.options.index = 1;
         }
 
-        if lower_layer.is_some() {
+        if upper_layer.is_some() {
             let layer_mount_configs = root_mount_config.options.layers.as_mut().unwrap();
-            // container SEFS in layers
-            let root_container_sefs_mount_config = layer_mount_configs
+            // container AsyncSFS/SEFS in layers
+            let root_container_fs_mount_config = layer_mount_configs
                 .iter_mut()
                 .find(|m| {
                     m.target == Path::new("/")
-                        && m.type_ == ConfigMountFsType::TYPE_SEFS
+                        && (m.type_ == ConfigMountFsType::TYPE_ASYNC_SFS
+                            || m.type_ == ConfigMountFsType::TYPE_SEFS)
                         && m.options.mac.is_none()
                         && m.options.index == 0
                 })
-                .ok_or_else(|| {
-                    errno!(Errno::ENOENT, "the container SEFS in layers is not valid")
-                })?;
+                .ok_or_else(|| errno!(Errno::ENOENT, "the container FS in layers is not valid"))?;
 
-            root_container_sefs_mount_config.source = lower_layer;
+            root_container_fs_mount_config.source = upper_layer;
         }
 
         if entry_point.is_some() {

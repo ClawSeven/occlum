@@ -34,11 +34,17 @@ jobs:
           exit 1;
         fi'
 
+    - name: Unit test
+      run: docker exec ${{ github.job }} bash -c "cd /root/occlum; UT_OPTION="--test-threads=1" make unit-test"
+
     - name: Integration test
       run:  docker exec ${{ github.job }} bash -c "cd /root/occlum; OCCLUM_LOG_LEVEL=trace SGX_MODE=SIM make test"
 
     - name: Integration test with Glibc
       run:  docker exec ${{ github.job }} bash -c "cd /root/occlum; OCCLUM_LOG_LEVEL=trace SGX_MODE=SIM make test-glibc"
+
+    - name: Integration test with legacy Occlum configuration (SEFS)
+      run:  docker exec ${{ github.job }} bash -c "cd /root/occlum/test; OCCLUM_LOG_LEVEL=trace SGX_MODE=SIM make test-legacy"
 
     - name: Show failed cases
       if: ${{ failure() }}

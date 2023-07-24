@@ -68,6 +68,32 @@ impl AsyncFileHandle {
         Ok(total_len)
     }
 
+    pub async fn preadv(&self, bufs: &mut [&mut [u8]], offset: usize) -> Result<usize> {
+        if !self.access_mode.readable() {
+            return_errno!(EBADF, "File not readable");
+        }
+        let mut offset = offset;
+        let mut total_len = 0;
+        for buf in bufs {
+            match self.dentry.inode().read_at(offset, buf).await {
+                Ok(len) => {
+                    total_len += len;
+                    offset += len;
+                }
+                Err(_) if total_len != 0 => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(total_len)
+    }
+
+    pub async fn pread(&self, buf: &mut [u8], offset: usize) -> Result<usize> {
+        if !self.access_mode().readable() {
+            return_errno!(EBADF, "file is not readable");
+        }
+        self.dentry.inode().read_at(offset, buf).await
+    }
+
     pub async fn write(&self, buf: &[u8]) -> Result<usize> {
         if !self.access_mode.writable() {
             return_errno!(EBADF, "File not writable");
@@ -105,6 +131,32 @@ impl AsyncFileHandle {
         Ok(total_len)
     }
 
+    pub async fn pwritev(&self, bufs: &[&[u8]], offset: usize) -> Result<usize> {
+        if !self.access_mode.writable() {
+            return_errno!(EBADF, "File not writable");
+        }
+        let mut offset = offset;
+        let mut total_len = 0;
+        for buf in bufs {
+            match self.dentry.inode().write_at(offset, buf).await {
+                Ok(len) => {
+                    total_len += len;
+                    offset += len;
+                }
+                Err(_) if total_len != 0 => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(total_len)
+    }
+
+    pub async fn pwrite(&self, buf: &[u8], offset: usize) -> Result<usize> {
+        if !self.access_mode().writable() {
+            return_errno!(EBADF, "file is not writable");
+        }
+        self.dentry.inode().write_at(offset, buf).await
+    }
+
     pub async fn seek(&self, pos: SeekFrom) -> Result<usize> {
         let mut offset = self.offset.lock().await;
         let new_offset: i64 = match pos {
@@ -139,13 +191,8 @@ impl AsyncFileHandle {
         *offset
     }
 
-    pub fn poll(&self, mask: Events, _poller: Option<&Poller>) -> Events {
-        let events = match self.access_mode {
-            AccessMode::O_RDONLY => Events::IN,
-            AccessMode::O_WRONLY => Events::OUT,
-            AccessMode::O_RDWR => Events::IN | Events::OUT,
-        };
-        events | mask
+    pub fn poll(&self, mask: Events, poller: Option<&Poller>) -> Events {
+        self.dentry().inode().poll(mask, poller)
     }
 
     pub fn register_observer(&self, _observer: Arc<dyn Observer>, _mask: Events) -> Result<()> {
@@ -197,7 +244,7 @@ impl AsyncFileHandle {
         let ext = match self.dentry().inode().ext() {
             Some(ext) => ext,
             None => {
-                warn!("Inode extension is not supportted, the lock could be placed");
+                warn!("Inode extension is not supported, the lock could be placed");
                 lock.set_type(RangeLockType::F_UNLCK);
                 return Ok(());
             }

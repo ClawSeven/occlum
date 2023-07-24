@@ -12,7 +12,10 @@ extern crate sgx_types;
 extern crate log;
 
 use crate::prelude::*;
-use async_io::fs::{DirentWriterContext, Extension, FallocateMode, FileType, FsInfo, Metadata};
+use async_io::event::{Events, Poller};
+use async_io::fs::{
+    DirentWriterContext, Extension, FallocateMode, FileType, FsInfo, FsMac, Metadata,
+};
 use async_io::ioctl::IoctlCmd;
 use async_rt::sync::RwLock as AsyncRwLock;
 use async_trait::async_trait;
@@ -92,6 +95,10 @@ impl AsyncFileSystem for AsyncMountFS {
 
     async fn info(&self) -> FsInfo {
         self.inner.info().await
+    }
+
+    async fn mac(&self) -> FsMac {
+        self.inner.mac().await
     }
 }
 
@@ -273,10 +280,6 @@ impl AsyncInode for AsyncMInode {
         Ok(self.find(name).await?)
     }
 
-    async fn get_entry(&self, id: usize) -> Result<String> {
-        self.inner.get_entry(id).await
-    }
-
     async fn iterate_entries(&self, ctx: &mut DirentWriterContext) -> Result<usize> {
         self.inner.iterate_entries(ctx).await
     }
@@ -326,6 +329,10 @@ impl AsyncInode for AsyncMInode {
             }
         }
         Ok(())
+    }
+
+    fn poll(&self, mask: Events, poller: Option<&Poller>) -> Events {
+        self.inner.poll(mask, poller)
     }
 
     fn fs(&self) -> Arc<dyn AsyncFileSystem> {

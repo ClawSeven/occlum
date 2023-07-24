@@ -22,7 +22,7 @@ pub trait BlockDeviceAsFile: Any + Send + Sync {
     async fn sync(&self) -> Result<()>;
 
     /// Flush specified cached blocks to the underlying device.
-    async fn flush_blocks(&self, blocks: &[BlockId]) -> Result<usize>;
+    async fn flush_blocks(&self, blocks: &[Bid]) -> Result<usize>;
 }
 
 #[async_trait]
@@ -43,7 +43,7 @@ impl BlockDeviceAsFile for dyn BlockDevice {
         Impl::new(self).sync().await
     }
 
-    async fn flush_blocks(&self, blocks: &[BlockId]) -> Result<usize> {
+    async fn flush_blocks(&self, blocks: &[Bid]) -> Result<usize> {
         Impl::new(self).flush_blocks(blocks).await
     }
 }
@@ -66,12 +66,12 @@ impl<B: BlockDevice> BlockDeviceAsFile for B {
         Impl::new(self).sync().await
     }
 
-    async fn flush_blocks(&self, blocks: &[BlockId]) -> Result<usize> {
+    async fn flush_blocks(&self, blocks: &[Bid]) -> Result<usize> {
         Impl::new(self).flush_blocks(blocks).await
     }
 }
 
-// TODO: The following implementation does not gurantee the atomicity of concurrent
+// TODO: The following implementation does not guarantee the atomicity of concurrent
 // reads and writes when their offsets or lengths are not block aligned.
 // Is this a problem? Should the interface promise such properties?
 //
@@ -136,7 +136,7 @@ impl<'a> Impl<'a> {
             vec![buf]
         };
         let req = BioReqBuilder::new(BioType::Read)
-            .addr(offset / BLOCK_SIZE)
+            .addr(Bid::from_byte_offset(offset))
             .bufs(bufs)
             .on_drop(|_req: &BioReq, mut bufs: Vec<BlockBuf>| {
                 let buf = bufs.remove(0);
@@ -200,8 +200,8 @@ impl<'a> Impl<'a> {
                     let ptr = NonNull::new_unchecked(whole_block_buf.as_mut_ptr());
                     let len = whole_block_buf.len();
                     debug_assert!(len % BLOCK_SIZE == 0);
-                    // Safety. The memory refered to by the pair of pointer and
-                    // length is valid during the entire life cyle of the request.
+                    // Safety. The memory referred to by the pair of pointer and
+                    // length is valid during the entire life cycle of the request.
                     BlockBuf::from_raw_parts(ptr, len)
                 };
                 bufs.push(buf);
@@ -229,7 +229,7 @@ impl<'a> Impl<'a> {
 
         // Finally, we are ready to construct the read request
         let req = BioReqBuilder::new(BioType::Read)
-            .addr(offset / BLOCK_SIZE)
+            .addr(Bid::from_byte_offset(offset))
             .bufs(bufs)
             .ext(extra_info)
             // When the request is to be dropped, we free the two boxed slices
@@ -326,7 +326,7 @@ impl<'a> Impl<'a> {
             vec![buf]
         };
         let req = BioReqBuilder::new(BioType::Write)
-            .addr(offset / BLOCK_SIZE)
+            .addr(Bid::from_byte_offset(offset))
             .bufs(bufs)
             .on_drop(|_req: &BioReq, mut bufs: Vec<BlockBuf>| {
                 let buf = bufs.remove(0);
@@ -394,8 +394,8 @@ impl<'a> Impl<'a> {
                     let ptr = NonNull::new_unchecked(whole_block_buf.as_ptr() as _);
                     let len = whole_block_buf.len();
                     debug_assert!(len % BLOCK_SIZE == 0);
-                    // Safety. The memory refered to by the pair of pointer and
-                    // length is valid during the entire life cyle of the request.
+                    // Safety. The memory referred to by the pair of pointer and
+                    // length is valid during the entire life cycle of the request.
                     BlockBuf::from_raw_parts(ptr, len)
                 };
                 bufs.push(buf);
@@ -448,7 +448,7 @@ impl<'a> Impl<'a> {
 
         // Finally, we are ready to construct the write request
         let req = BioReqBuilder::new(BioType::Write)
-            .addr(offset / BLOCK_SIZE)
+            .addr(Bid::from_byte_offset(offset))
             .bufs(bufs)
             .ext(extra_info)
             // When the request is to be dropped, we free the two boxed slices
@@ -493,7 +493,7 @@ impl<'a> Impl<'a> {
 
     // Do nothing in default implementation.
     #[allow(unused)]
-    pub async fn flush_blocks(&self, blocks: &[BlockId]) -> Result<usize> {
+    pub async fn flush_blocks(&self, blocks: &[Bid]) -> Result<usize> {
         Ok(0)
     }
 

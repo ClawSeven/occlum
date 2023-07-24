@@ -1,10 +1,12 @@
-use super::ipc::SHM_MANAGER;
 use super::*;
+
+use super::ipc::SHM_MANAGER;
 use crate::ctor::dtor;
 use crate::util::pku_util;
 use config::LIBOS_CONFIG;
-use std::ops::{Deref, DerefMut};
 use vm_manager::VMManager;
+
+use std::ops::{Deref, DerefMut};
 
 const RSRV_MEM_PERM: MemPerm =
     MemPerm::from_bits_truncate(MemPerm::READ.bits() | MemPerm::WRITE.bits());
@@ -17,18 +19,16 @@ impl UserSpaceVMManager {
         // TODO: Use reserved memory API for init space and use EDMM API for max space.
         let rsrv_mem_size = LIBOS_CONFIG.resource_limits.user_space_init_size;
         let vm_range = unsafe {
-            // TODO: Current sgx_alloc_rsrv_mem implmentation will commit all the pages of the desired size, which will consume
+            // TODO: Current sgx_alloc_rsrv_mem implementation will commit all the pages of the desired size, which will consume
             // a lot of time. When EDMM is supported, there is no need to commit all the pages at the initialization stage. A function
             // which reserves memory but not commit pages should be provided then.
             let ptr = sgx_alloc_rsrv_mem(rsrv_mem_size);
             if ptr.is_null() {
                 return_errno!(ENOMEM, "run out of reserved memory");
             }
-            // Change the page permission to RW (default)
-            assert!(
-                sgx_tprotect_rsrv_mem(ptr, rsrv_mem_size, RSRV_MEM_PERM.bits())
-                    == sgx_status_t::SGX_SUCCESS
-            );
+
+            // Without EDMM support and the ReservedMemExecutable is set to 1, the reserved memory will be RWX. And we can't change the reserved memory permission.
+            // With EDMM support, the reserved memory permission is RW by default. And we can change the permissions when needed.
 
             let addr = ptr as usize;
             debug!(
@@ -49,13 +49,11 @@ impl UserSpaceVMManager {
     }
 }
 
-// This provides module teardown function attribute similar with `__attribute__((destructor))` in C/C++ and will
-// be called after the main function. Static variables are still safe to visit at this time.
-#[dtor]
-fn free_user_space() {
-    SHM_MANAGER.clean_when_libos_exit();
+// This will be called after all libos processes exit. Static variables are still safe to visit at this time.
+pub async fn free_user_space() {
+    SHM_MANAGER.clean_when_libos_exit().await;
     let range = USER_SPACE_VM_MANAGER.range();
-    assert!(USER_SPACE_VM_MANAGER.verified_clean_when_exit());
+    assert!(USER_SPACE_VM_MANAGER.verified_clean_when_exit().await);
     let addr = range.start();
     let size = range.size();
     info!("free user space VM: {:?}", range);
@@ -100,15 +98,4 @@ extern "C" {
     // Return: 0 on success; otherwise -1
     //
     fn sgx_free_rsrv_mem(addr: *const c_void, length: usize) -> i32;
-
-    // Modify the access permissions of the pages in the reserved memory area
-    //
-    // Parameters:
-    // Inputs: addr[in]: Starting address of region which needs to change access
-    //         permission. Page aligned.
-    //         length[in]: The length of the memory to be manipulated in bytes. Page aligned.
-    //         prot[in]: The target memory protection.
-    // Return: sgx_status_t
-    //
-    fn sgx_tprotect_rsrv_mem(addr: *const c_void, length: usize, prot: i32) -> sgx_status_t;
 }

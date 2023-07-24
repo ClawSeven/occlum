@@ -1,6 +1,6 @@
 [package]
 name = "Occlum"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 edition = "2021"
 
 [lib]
@@ -13,7 +13,9 @@ async-io  = { path = "crates/async-io", features = ["sgx"] }
 async-vfs = { path = "crates/async-vfs", features = ["sgx"] }
 async-sfs = { path = "crates/async-sfs", default-features = false, features = ["sgx"] }
 async-mountfs = { path = "crates/async-mountfs", features = ["sgx"] }
+async-unionfs = { path = "crates/async-unionfs", features = ["sgx"] }
 async-trait = "0.1.52"
+async-recursion = "1.0.4"
 atomic = "0.5"
 bitflags = "1.0"
 bitvec = { version = "0.17", default-features = false, features = ["alloc"]  }
@@ -42,6 +44,7 @@ async-socket  = { path = "crates/async-socket", default-features = false, featur
 sgx-disk  = { path = "crates/sgx-disk", default-features = false, features = ["sgx"] }
 block-device  = { path = "crates/block-device" }
 page-cache = { path = "crates/page-cache", default-features = false, features = ["sgx"] }
+jindisk  = { path = "crates/jindisk", default-features = false, features = ["sgx"] }
 scroll = { version = "0.11.0", default-features = false }
 futures = { version = "0.3", default-features = false, features = ["alloc", "async-await"] }
 itertools = { version = "0.10.0", default-features = false, features = ["use_alloc"]  }

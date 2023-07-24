@@ -1,6 +1,6 @@
 //! CachedDisk tests
 use async_rt::wait::Waiter;
-use block_device::{mem_disk::MemDisk, BlockDeviceAsFile, BLOCK_SIZE};
+use block_device::{mem_disk::MemDisk, Bid, BlockDeviceAsFile, BLOCK_SIZE};
 use errno::prelude::*;
 use page_cache::*;
 
@@ -24,21 +24,21 @@ macro_rules! new_cached_disk_for_tests {
 #[test]
 fn cached_disk_read_write() -> Result<()> {
     async_rt::task::block_on(async move {
-        let cached_disk = new_cached_disk_for_tests!(MB * 256);
+        let cached_disk = new_cached_disk_for_tests!(256 * MB);
         let content: u8 = 5;
-        const SIZE: usize = BLOCK_SIZE * 1;
-        const OFFSET: usize = 1024;
+        const RW_SIZE: usize = 2 * BLOCK_SIZE;
+        let offset = 1024;
 
-        let mut read_buf: [u8; SIZE] = [0; SIZE];
-        let len = cached_disk.read(OFFSET, &mut read_buf[..]).await?;
-        assert_eq!(SIZE, len, "[CachedDisk] read failed");
+        let mut read_buf: [u8; RW_SIZE] = [0; RW_SIZE];
+        let len = cached_disk.read(offset, &mut read_buf[..]).await?;
+        assert_eq!(RW_SIZE, len, "[CachedDisk] read failed");
 
-        let write_buf: [u8; SIZE] = [content; SIZE];
-        let len = cached_disk.write(OFFSET, &write_buf[..]).await?;
-        assert_eq!(SIZE, len, "[CachedDisk] write failed");
+        let write_buf: [u8; RW_SIZE] = [content; RW_SIZE];
+        let len = cached_disk.write(offset, &write_buf[..]).await?;
+        assert_eq!(RW_SIZE, len, "[CachedDisk] write failed");
 
-        let len = cached_disk.read(OFFSET, &mut read_buf[..]).await?;
-        assert_eq!(SIZE, len, "[CachedDisk] read failed");
+        let len = cached_disk.read(offset, &mut read_buf[..]).await?;
+        assert_eq!(RW_SIZE, len, "[CachedDisk] read failed");
         assert_eq!(read_buf, write_buf, "[CachedDisk] read wrong content");
 
         let rw_cnt = 10_0000;
@@ -57,7 +57,7 @@ fn cached_disk_read_write() -> Result<()> {
 #[test]
 fn cached_disk_flush() -> Result<()> {
     async_rt::task::block_on(async move {
-        let cached_disk = new_cached_disk_for_tests!(MB * 256);
+        let cached_disk = new_cached_disk_for_tests!(256 * MB);
         const SIZE: usize = BLOCK_SIZE;
         let write_cnt = 1;
         for i in 0..write_cnt {
@@ -87,7 +87,7 @@ fn cached_disk_flush() -> Result<()> {
 #[test]
 fn cached_disk_flush_pages() -> Result<()> {
     async_rt::task::block_on(async move {
-        let cached_disk = new_cached_disk_for_tests!(MB * 256);
+        let cached_disk = new_cached_disk_for_tests!(256 * MB);
         const SIZE: usize = BLOCK_SIZE;
         let write_cnt = 100;
         for i in 0..write_cnt {
@@ -97,7 +97,7 @@ fn cached_disk_flush_pages() -> Result<()> {
             assert_eq!(SIZE, len, "[CachedDisk] write failed");
         }
 
-        let pages = vec![0, 1, 2];
+        let pages = vec![Bid::new(0), Bid::new(1), Bid::new(2)];
         let flush_num = cached_disk.flush_blocks(&pages).await?;
         assert_eq!(flush_num, pages.len(), "[CachedDisk] flush pages failed");
 
@@ -109,7 +109,7 @@ fn cached_disk_flush_pages() -> Result<()> {
 #[test]
 fn cached_disk_flusher_task() -> Result<()> {
     async_rt::task::block_on(async move {
-        let cached_disk = Arc::new(new_cached_disk_for_tests!(MB * 256));
+        let cached_disk = Arc::new(new_cached_disk_for_tests!(256 * MB));
         let reader = cached_disk.clone();
         let writer = cached_disk.clone();
         const SIZE: usize = 4096;
@@ -147,7 +147,7 @@ fn cached_disk_flusher_task() -> Result<()> {
 #[test]
 fn cached_disk_evictor_task() -> Result<()> {
     async_rt::task::block_on(async move {
-        let cached_disk = new_cached_disk_for_tests!(BLOCK_SIZE * 100);
+        let cached_disk = new_cached_disk_for_tests!(100 * BLOCK_SIZE);
 
         // Support out-limit read/write thanks to the evictor task
         let rw_cnt = 500;

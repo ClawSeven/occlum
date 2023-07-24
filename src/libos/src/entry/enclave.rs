@@ -278,9 +278,12 @@ pub extern "C" fn occlum_ecall_shutdown_vcpus() -> i32 {
 
     table::wait_all_process_exit();
 
-    // Flush the async rootfs
     async_rt::task::block_on(async {
+        // Flush the async rootfs
         crate::fs::rootfs().await.sync().await.unwrap();
+
+        // Free user space VM
+        crate::vm::free_user_space().await;
     });
 
     // TODO: stop all the kernel threads/tasks
@@ -441,7 +444,7 @@ fn validate_program_path(target_path: &PathBuf) -> Result<()> {
         return_errno!(EINVAL, "program path must be absolute");
     }
 
-    // Forbid paths like /bin/../root, which may circument our prefix-based path matching
+    // Forbid paths like /bin/../root, which may circumvent our prefix-based path matching
     let has_parent_component = {
         target_path
             .components()

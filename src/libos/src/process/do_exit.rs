@@ -2,7 +2,9 @@ use std::intrinsics::atomic_store;
 use std::sync::Weak;
 
 use super::do_futex::futex_wake;
-use super::do_vfork::{is_vforked_child_process, vfork_return_to_parent};
+use super::do_vfork::{
+    is_vforked_child_process, reap_zombie_child_created_with_vfork, vfork_return_to_parent,
+};
 use super::do_wait4::idle_reap_zombie_children;
 use super::pgrp::clean_pgrp_when_exit;
 use super::process::{Process, ProcessFilter};
@@ -17,8 +19,9 @@ use crate::vm::USER_SPACE_VM_MANAGER;
 pub async fn do_exit_group(status: i32) -> Result<isize> {
     if is_vforked_child_process() {
         let current = current!();
+        let child_exit_status = TermStatus::Exited(status as u8);
         let mut curr_user_ctxt = CURRENT_CONTEXT.with(|context| context.as_ptr());
-        vfork_return_to_parent(curr_user_ctxt as *mut _, &current).await
+        vfork_return_to_parent(curr_user_ctxt as *mut _, &current, Some(child_exit_status)).await
     } else {
         let term_status = TermStatus::Exited(status as u8);
         let current = current!();
@@ -88,7 +91,7 @@ async fn exit_thread(term_status: TermStatus) {
     // If this thread is the last thread, close all files then exit the process
     if num_remaining_threads == 0 {
         thread.close_all_files_when_exit().await;
-        exit_process(&thread, term_status, None);
+        exit_process(&thread, term_status, None).await;
     }
 
     // Notify a thread, if any, that wait on this thread to exit.
@@ -96,8 +99,13 @@ async fn exit_thread(term_status: TermStatus) {
     futex_wake(Arc::as_ptr(&thread.process()) as *const i32, 1);
 }
 
-fn exit_process(thread: &ThreadRef, term_status: TermStatus, new_parent_ref: Option<ProcessRef>) {
+async fn exit_process(
+    thread: &ThreadRef,
+    term_status: TermStatus,
+    new_parent_ref: Option<ProcessRef>,
+) {
     let process = thread.process();
+    let pid = process.pid();
     // Deadlock note: always lock parent first, then child.
 
     // Lock the idle process since it may adopt new children.
@@ -115,7 +123,7 @@ fn exit_process(thread: &ThreadRef, term_status: TermStatus, new_parent_ref: Opt
 
         let parent_inner = parent.inner();
         // To prevent the race condition that parent is changed after `parent()`,
-        // but before `parent().innner()`, we need to check again here.
+        // but before `parent().inner()`, we need to check again here.
         if parent.pid() != process.parent().pid() {
             continue;
         }
@@ -124,8 +132,8 @@ fn exit_process(thread: &ThreadRef, term_status: TermStatus, new_parent_ref: Opt
     // Lock the current process
     let mut process_inner = process.inner();
     // Clean used VM
-    USER_SPACE_VM_MANAGER.free_chunks_when_exit(thread);
-    SHM_MANAGER.detach_shm_when_process_exit(thread);
+    USER_SPACE_VM_MANAGER.free_chunks_when_exit(thread).await;
+    SHM_MANAGER.detach_shm_when_process_exit(thread).await;
 
     if let Some(new_parent_ref) = new_parent_ref {
         // Exit old process in execve syscall
@@ -134,6 +142,9 @@ fn exit_process(thread: &ThreadRef, term_status: TermStatus, new_parent_ref: Opt
 
         // Let new_process to adopt the children of current process
         process_inner.exit(term_status, &new_parent_ref, &mut new_parent_inner, &parent);
+
+        // For vfork-and-exit children, we don't need to reap them here.
+        // Because the new parent process share the same pid with the old parent process.
 
         // Remove current process from parent process' zombie list.
         if parent_inner.is_none() {
@@ -156,11 +167,18 @@ fn exit_process(thread: &ThreadRef, term_status: TermStatus, new_parent_ref: Opt
         clean_pgrp_when_exit(process);
 
         process_inner.exit(term_status, &idle_ref, &mut idle_inner, &parent);
+
+        // For vfork-and-exit children, just clean them to free the pid
+        let _ = reap_zombie_child_created_with_vfork(pid);
+
         idle_inner.remove_zombie_child(pid);
     } else {
         // Otherwise, we need to notify the parent process
         let mut parent_inner = parent_inner.unwrap();
         process_inner.exit(term_status, &idle_ref, &mut idle_inner, &parent);
+
+        // For vfork-and-exit children, just clean them to free the pid
+        let _ = reap_zombie_child_created_with_vfork(pid);
 
         //Send SIGCHLD to parent
         let signal = Box::new(KernelSignal::new(SigNum::from(SIGCHLD)));
@@ -197,17 +215,17 @@ fn wake_host(process: &ProcessRef, term_status: TermStatus) {
     }
 }
 
-pub fn exit_old_process_for_execve(term_status: TermStatus, new_parent_ref: ProcessRef) {
+pub async fn exit_old_process_for_execve(term_status: TermStatus, new_parent_ref: ProcessRef) {
     let thread = current!();
 
     // Exit current thread
     let num_remaining_threads = thread.exit(term_status);
     if thread.tid() != thread.process().pid() {
         // Keep the main thread's tid available as long as the process is not destroyed.
-        // Main thread doesn't need to delete here. It will be repalced later.
+        // Main thread doesn't need to delete here. It will be replaced later.
         table::del_thread(thread.tid()).expect("tid must be in the table");
     }
 
     debug_assert!(num_remaining_threads == 0);
-    exit_process(&thread, term_status, Some(new_parent_ref));
+    exit_process(&thread, term_status, Some(new_parent_ref)).await;
 }

@@ -65,7 +65,7 @@ pub async fn do_exec(
                 init_cpu_state,
             ));
 
-            return vfork_return_to_parent(curr_user_ctxt, current_ref).await;
+            return vfork_return_to_parent(curr_user_ctxt, current_ref, None).await;
         }
 
         // Force exit all child threads of current process
@@ -76,7 +76,7 @@ pub async fn do_exec(
         wait_for_other_threads_to_exit(current_ref).await;
 
         // Exit current thread and let new process to adopt current's child process
-        exit_old_process_for_execve(term_status, new_process_ref.clone());
+        exit_old_process_for_execve(term_status, new_process_ref.clone()).await;
 
         // Update process and thread in global table
         table::replace_process(new_process_ref.pid(), new_process_ref.clone());

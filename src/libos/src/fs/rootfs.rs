@@ -9,15 +9,17 @@ use config::{ConfigApp, ConfigMountFsType};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::untrusted::path::PathEx;
+use util::sgx::get_autokey_with_policy;
 
 use async_mountfs::AsyncMountFS;
 use async_sfs::AsyncSimpleFS;
+use async_unionfs::AsyncUnionFS;
 use block_device::{BlockDeviceAsFile, BLOCK_SIZE};
+use jindisk::JinDisk;
 use page_cache::{impl_fixed_size_page_alloc, CachedDisk};
 use rcore_fs_ramfs::RamFS;
 use rcore_fs_sefs::dev::*;
 use rcore_fs_sefs::SEFS;
-use rcore_fs_unionfs::UnionFS;
 use sgx_disk::{HostDisk, IoUringDisk, SyncIoDisk};
 
 /// Get or initilize the async rootfs
@@ -52,7 +54,7 @@ pub async fn rootfs() -> &'static Arc<dyn AsyncFileSystem> {
     unsafe { ROOT_FS.as_ref().unwrap() }
 }
 
-/// Update the rootfs, must be called after initilized
+/// Update the rootfs, must be called after initialized
 pub async fn update_rootfs(new_rootfs: Arc<dyn AsyncFileSystem>) -> Result<()> {
     loop {
         match STATE.compare_exchange(
@@ -95,7 +97,7 @@ pub async fn init_rootfs(
     mount_configs: &Vec<ConfigMount>,
     user_key: &Option<sgx_key_128bit_t>,
 ) -> Result<Arc<dyn AsyncFileSystem>> {
-    let rootfs = open_rootfs_according_to(mount_configs, user_key)?;
+    let rootfs = open_rootfs_according_to(mount_configs, user_key).await?;
     mount_nonroot_fs_according_to(&rootfs.root_inode().await, mount_configs, user_key, true)
         .await?;
     Ok(rootfs)
@@ -108,7 +110,7 @@ const UNINITIALIZED: usize = 0;
 const INITIALIZING: usize = 1;
 const INITIALIZED: usize = 2;
 
-fn open_rootfs_according_to(
+async fn open_rootfs_according_to(
     mount_configs: &Vec<ConfigMount>,
     user_key: &Option<sgx_key_128bit_t>,
 ) -> Result<Arc<dyn AsyncFileSystem>> {
@@ -128,24 +130,38 @@ fn open_rootfs_according_to(
                 && m.type_ == ConfigMountFsType::TYPE_SEFS
                 && (m.options.mac.is_some() || m.options.index == 1)
         })
-        .ok_or_else(|| errno!(Errno::ENOENT, "the image SEFS in layers is not valid"))?;
-    let root_image_sefs =
-        open_or_create_sefs_according_to(&root_image_sefs_mount_config, user_key)?;
-    // container SEFS in layers
-    let root_container_sefs_mount_config = layer_mount_configs
+        .ok_or_else(|| errno!(Errno::ENOENT, "the image sefs in layers is not valid"))?;
+    let root_image_sefs = SyncFS::new(open_or_create_sefs_according_to(
+        &root_image_sefs_mount_config,
+        user_key,
+    )?);
+    // TODO: Support AsyncSFS as root image layer
+
+    // container AsyncSFS/SEFS in layers
+    let root_container_fs_mount_config = layer_mount_configs
         .iter()
         .find(|m| {
             m.target == Path::new("/")
-                && m.type_ == ConfigMountFsType::TYPE_SEFS
+                && (m.type_ == ConfigMountFsType::TYPE_ASYNC_SFS
+                    || m.type_ == ConfigMountFsType::TYPE_SEFS)
                 && m.options.mac.is_none()
                 && m.options.index == 0
         })
-        .ok_or_else(|| errno!(Errno::ENOENT, "the container SEFS in layers is not valid"))?;
-    let root_container_sefs =
-        open_or_create_sefs_according_to(&root_container_sefs_mount_config, user_key)?;
+        .ok_or_else(|| errno!(Errno::ENOENT, "the container fs in layers is not valid"))?;
+    let root_container_fs = match root_container_fs_mount_config.type_ {
+        ConfigMountFsType::TYPE_ASYNC_SFS => {
+            open_or_create_async_sfs_according_to(&root_container_fs_mount_config, user_key).await?
+        }
+        ConfigMountFsType::TYPE_SEFS => SyncFS::new(open_or_create_sefs_according_to(
+            &root_container_fs_mount_config,
+            user_key,
+        )?),
+        _ => unreachable!(),
+    };
+
     // create UnionFS
-    let root_unionfs = UnionFS::new(vec![root_container_sefs, root_image_sefs])?;
-    let root_mountable_unionfs = AsyncMountFS::new(SyncFS::new(root_unionfs));
+    let root_unionfs = AsyncUnionFS::new(vec![root_container_fs, root_image_sefs]).await?;
+    let root_mountable_unionfs = AsyncMountFS::new(root_unionfs);
     Ok(root_mountable_unionfs as _)
 }
 
@@ -199,7 +215,7 @@ pub async fn mount_nonroot_fs_according_to(
                 mount_nonroot_fs(ramfs, root, &mc.target.join("shm"), follow_symlink).await?;
             }
             TYPE_PROCFS => {
-                let procfs = SyncFS::new(ProcFS::new());
+                let procfs = ProcFS::new();
                 mount_nonroot_fs(procfs, root, &mc.target, follow_symlink).await?;
             }
             TYPE_UNIONFS => {
@@ -214,21 +230,36 @@ pub async fn mount_nonroot_fs_according_to(
                 let container_fs_mc = layer_mcs
                     .get(1)
                     .ok_or_else(|| errno!(EINVAL, "Invalid container layer"))?;
-                let unionfs = match (&image_fs_mc.type_, &container_fs_mc.type_) {
-                    (TYPE_SEFS, TYPE_SEFS) => {
-                        let image_sefs = open_or_create_sefs_according_to(image_fs_mc, user_key)?;
-                        let container_sefs =
-                            open_or_create_sefs_according_to(container_fs_mc, user_key)?;
-                        SyncFS::new(UnionFS::new(vec![container_sefs, image_sefs])?)
-                    }
-                    (_, _) => {
-                        return_errno!(EINVAL, "Unsupported fs type inside unionfs");
-                    }
+                let unionfs = {
+                    let image_fs = match &image_fs_mc.type_ {
+                        TYPE_SEFS => {
+                            SyncFS::new(open_or_create_sefs_according_to(image_fs_mc, user_key)?)
+                        }
+                        TYPE_ASYNC_SFS => {
+                            open_or_create_async_sfs_according_to(image_fs_mc, user_key).await?
+                        }
+                        _ => {
+                            return_errno!(EINVAL, "Unsupported fs type inside unionfs");
+                        }
+                    };
+                    let container_fs = match &container_fs_mc.type_ {
+                        TYPE_SEFS => SyncFS::new(open_or_create_sefs_according_to(
+                            container_fs_mc,
+                            user_key,
+                        )?),
+                        TYPE_ASYNC_SFS => {
+                            open_or_create_async_sfs_according_to(container_fs_mc, user_key).await?
+                        }
+                        _ => {
+                            return_errno!(EINVAL, "Unsupported fs type inside unionfs");
+                        }
+                    };
+                    AsyncUnionFS::new(vec![container_fs, image_fs]).await?
                 };
                 mount_nonroot_fs(unionfs, root, &mc.target, follow_symlink).await?;
             }
             TYPE_ASYNC_SFS => {
-                let async_sfs = open_or_create_async_sfs_according_to(&mc).await?;
+                let async_sfs = open_or_create_async_sfs_according_to(&mc, user_key).await?;
                 mount_nonroot_fs(async_sfs, root, &mc.target, follow_symlink).await?;
             }
         }
@@ -287,11 +318,20 @@ pub async fn umount_nonroot_fs(
 
 async fn open_or_create_async_sfs_according_to(
     mc: &ConfigMount,
+    user_key: &Option<sgx_key_128bit_t>,
 ) -> Result<Arc<dyn AsyncFileSystem>> {
+    assert!(mc.type_ == ConfigMountFsType::TYPE_ASYNC_SFS);
+
     if mc.source.is_none() {
         return_errno!(EINVAL, "Source is expected for Async-SFS");
     }
-    let source_path = mc.source.as_ref().unwrap();
+    let source_path = {
+        let mut source_path = mc.source.clone().unwrap();
+        if source_path.is_dir() {
+            source_path.push("async_sfs_image");
+        }
+        source_path
+    };
 
     if mc.options.page_cache_size.is_none() {
         return_errno!(EINVAL, "Page cache size is expected for Async-SFS");
@@ -300,23 +340,32 @@ async fn open_or_create_async_sfs_according_to(
     // AsyncFsPageAlloc is a fixed-size allocator for page cache.
     impl_fixed_size_page_alloc! { AsyncFsPageAlloc, page_cache_size };
 
-    let async_sfs = if source_path.exists() {
-        let cache_disk = {
-            let sync_disk = SyncIoDisk::open(&source_path)?;
-            CachedDisk::<AsyncFsPageAlloc>::new(Arc::new(sync_disk))?
-        };
-        AsyncSimpleFS::open(Arc::new(cache_disk)).await?
+    let root_key = if let Some(user_key) = user_key {
+        user_key.clone()
     } else {
-        if mc.options.total_size.is_none() {
+        let autokey_policy = mc.options.autokey_policy;
+        get_autokey_with_policy(&autokey_policy, &source_path)?
+    };
+
+    let async_sfs = if source_path.exists() {
+        let cached_disk = {
+            let sync_disk = SyncIoDisk::open(&source_path)?;
+            let jindisk = JinDisk::open(Arc::new(sync_disk), root_key).await?;
+            CachedDisk::<AsyncFsPageAlloc>::new(Arc::new(jindisk))?
+        };
+        AsyncSimpleFS::open(Arc::new(cached_disk)).await?
+    } else {
+        if mc.options.async_sfs_total_size.is_none() {
             return_errno!(EINVAL, "Total size is expected for Async-SFS");
         }
-        let total_size = mc.options.total_size.unwrap();
-        let cache_disk = {
+        let total_size = mc.options.async_sfs_total_size.unwrap();
+        let cached_disk = {
             let total_blocks = total_size / BLOCK_SIZE;
             let sync_disk = SyncIoDisk::create_new(&source_path, total_blocks)?;
-            CachedDisk::<AsyncFsPageAlloc>::new(Arc::new(sync_disk))?
+            let jindisk = JinDisk::create(Arc::new(sync_disk), root_key);
+            CachedDisk::<AsyncFsPageAlloc>::new(Arc::new(jindisk))?
         };
-        AsyncSimpleFS::create(Arc::new(cache_disk)).await?
+        AsyncSimpleFS::create(Arc::new(cached_disk)).await?
     };
     Ok(async_sfs as _)
 }
@@ -337,10 +386,17 @@ fn open_or_create_sefs_according_to(
         return_errno!(EINVAL, "Integrity protected SEFS cannot be temporary");
     }
     let source_path = mc.source.as_ref().unwrap();
+    let cache_size = mc.options.sefs_cache_size;
     let sefs = if !temporary {
         if root_mac.is_some() {
             SEFS::open(
-                Box::new(SgxStorage::new(source_path, user_key, &root_mac, &None)),
+                Box::new(SgxStorage::new(
+                    source_path,
+                    user_key,
+                    &root_mac,
+                    &None,
+                    cache_size,
+                )?),
                 &time::OcclumTimeProvider,
                 &SgxUuidProvider,
             )?
@@ -351,7 +407,8 @@ fn open_or_create_sefs_according_to(
                     user_key,
                     &None,
                     &autokey_policy,
-                )),
+                    cache_size,
+                )?),
                 &time::OcclumTimeProvider,
                 &SgxUuidProvider,
             )?
@@ -362,7 +419,8 @@ fn open_or_create_sefs_according_to(
                     user_key,
                     &None,
                     &autokey_policy,
-                )),
+                    cache_size,
+                )?),
                 &time::OcclumTimeProvider,
                 &SgxUuidProvider,
             )?
@@ -374,7 +432,8 @@ fn open_or_create_sefs_according_to(
                 user_key,
                 &None,
                 &autokey_policy,
-            )),
+                cache_size,
+            )?),
             &time::OcclumTimeProvider,
             &SgxUuidProvider,
         )?

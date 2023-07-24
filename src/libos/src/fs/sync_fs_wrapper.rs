@@ -1,5 +1,5 @@
 //! It is infeasible to implement AsyncInode for INode and AsyncFilesystem for FileSystem,
-//! because doing upcasting and downcasting between traits is not allowd.
+//! because doing upcasting and downcasting between traits is not allowed.
 //!
 //! The SyncFS and SyncInode are very special structs to wrap any FileSystems and INodes of rcore-fs.
 //! It is straightforward to upcast struct to trait or downcast trait to struct, so the sync FileSystem
@@ -7,7 +7,7 @@
 
 use super::*;
 
-use async_io::fs::Extension;
+use async_io::fs::{Extension, FsMac};
 use async_trait::async_trait;
 use async_vfs::{AsyncFileSystem, AsyncInode};
 
@@ -49,6 +49,10 @@ impl AsyncFileSystem for SyncFS {
 
     async fn info(&self) -> FsInfo {
         self.0.info()
+    }
+
+    async fn mac(&self) -> FsMac {
+        self.0.root_mac()
     }
 }
 
@@ -117,10 +121,6 @@ impl AsyncInode for SyncInode {
         Ok(Self::new(self.0.find(name)?))
     }
 
-    async fn get_entry(&self, id: usize) -> Result<String> {
-        Ok(self.0.get_entry(id)?)
-    }
-
     async fn iterate_entries(&self, ctx: &mut DirentWriterContext) -> Result<usize> {
         Ok(self.0.iterate_entries(ctx)?)
     }
@@ -132,6 +132,14 @@ impl AsyncInode for SyncInode {
                 },
         });
         Ok(())
+    }
+
+    fn poll(&self, mask: Events, _poller: Option<&Poller>) -> Events {
+        let events = match self.0.poll() {
+            Ok(poll_status) => Events::from(poll_status),
+            Err(_) => Events::empty(),
+        };
+        mask & events
     }
 
     fn ext(&self) -> Option<&Extension> {
